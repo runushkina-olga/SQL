@@ -1,0 +1,253 @@
+/* Проект первого модуля: анализ данных для агентства недвижимости
+ * Часть 2. Решаем ad hoc задачи
+ * 
+ * Автор:
+ * Дата:
+*/
+
+-- Пример фильтрации данных от аномальных значений
+-- Определим аномальные значения (выбросы) по значению перцентилей:
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+-- Найдем id объявлений, которые не содержат выбросы:
+filtered_id AS(
+    SELECT id
+    FROM real_estate.flats  
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits) 
+        AND rooms < (SELECT rooms_limit FROM limits) 
+        AND balcony < (SELECT balcony_limit FROM limits) 
+        AND ceiling_height < (SELECT ceiling_height_limit_h FROM limits) 
+        AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)
+    )
+-- Выведем объявления без выбросов:
+SELECT *
+FROM real_estate.flats
+WHERE id IN (SELECT * FROM filtered_id);
+
+
+-- Задача 1: Время активности объявлений
+-- Результат запроса должен ответить на такие вопросы:
+-- 1. Какие сегменты рынка недвижимости Санкт-Петербурга и городов Ленинградской области 
+--    имеют наиболее короткие или длинные сроки активности объявлений?
+-- 2. Какие характеристики недвижимости, включая площадь недвижимости, среднюю стоимость квадратного метра, 
+--    количество комнат и балконов и другие параметры, влияют на время активности объявлений? 
+--    Как эти зависимости варьируют между регионами?
+-- 3. Есть ли различия между недвижимостью Санкт-Петербурга и Ленинградской области по полученным результатам?
+
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+filtered_id AS(
+    SELECT id, 
+    total_area,
+    rooms,
+    balcony,
+    ceiling_height,
+    floors_total,
+    open_plan,
+    CASE
+    	WHEN city LIKE 'Санкт-Петербург' 
+    		THEN 'Санкт-Петербург'
+    	ELSE 'ЛенОбл'
+    END AS регион,
+    CASE
+    	WHEN days_exposition BETWEEN 1 AND 30 
+    		THEN 'до месяца'
+    	WHEN days_exposition BETWEEN 31 AND 90
+    		THEN 'до трех месяцев'
+    	WHEN days_exposition BETWEEN 91 AND 180
+    		THEN 'до полугода'
+    	WHEN days_exposition > 180
+    		THEN 'более полугода'
+    END AS сегмент_активности,
+    last_price / total_area AS cost_per_square_m
+    FROM real_estate.flats  
+    JOIN real_estate.city USING (city_id)
+    JOIN real_estate.advertisement USING (id)
+    JOIN real_estate.type USING (type_id)
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits) 
+        AND rooms < (SELECT rooms_limit FROM limits) 
+        AND balcony < (SELECT balcony_limit FROM limits) 
+        AND ceiling_height < (SELECT ceiling_height_limit_h FROM limits) 
+        AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)
+        AND type LIKE 'город' 
+    )
+SELECT 
+	регион,
+	сегмент_активности,
+	COUNT (id) AS количество_объявлений,
+	ROUND(AVG(cost_per_square_m) :: NUMERIC) AS средняя_стоимсоть_кв_м,
+	ROUND (AVG(total_area) :: NUMERIC) AS средняя_площадь,
+	PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY rooms) AS медиан_кол_комнат,
+	PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY balcony) AS медиан_кол_балконов,
+	ROUND(AVG (ceiling_height) :: NUMERIC, 2) AS средняя_высота_потолка,
+	PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY (floors_total)) AS медиан_кол_этажей
+FROM filtered_id 
+WHERE cost_per_square_m < 1907500 AND сегмент_активности IS NOT NULL
+GROUP BY регион, сегмент_активности
+ORDER BY регион DESC ,
+    CASE
+        WHEN сегмент_активности = 'до месяца' THEN 1
+        WHEN сегмент_активности = 'до трех месяцев' THEN 2
+        WHEN сегмент_активности = 'до полугода' THEN 3
+        WHEN сегмент_активности = 'более полугода' THEN 4
+        ELSE 5
+    END;
+ 
+-- Задача 2: Сезонность объявлений
+-- Результат запроса должен ответить на такие вопросы:
+-- 1. В какие месяцы наблюдается наибольшая активность в публикации объявлений о продаже недвижимости? 
+--    А в какие — по снятию? Это показывает динамику активности покупателей.
+-- 2. Совпадают ли периоды активной публикации объявлений и периоды, 
+--    когда происходит повышенная продажа недвижимости (по месяцам снятия объявлений)?
+-- 3. Как сезонные колебания влияют на среднюю стоимость квадратного метра и среднюю площадь квартир? 
+--    Что можно сказать о зависимости этих параметров от месяца?
+
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats
+    ),
+filtered_id AS(
+    SELECT
+    	ROW_NUMBER () OVER (ORDER BY COUNT(id) DESC) AS ранг,
+    	CASE 
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 1 THEN 'январь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 2 THEN 'февраль'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 3 THEN 'март'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 4 THEN 'апрель'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 5 THEN 'май'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 6 THEN 'июнь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 7 THEN 'июль'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 8 THEN 'август'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 9 THEN 'сентябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 10 THEN 'октябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 11 THEN 'ноябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition) = 12 THEN 'декабрь'
+    	END AS месяц_публикации,
+    	COUNT(id) AS количество_публикаций,
+    	ROUND(AVG (last_price / total_area)) AS средняя_стоимость_кв_м,
+    	ROUND(AVG (total_area)) AS средняя_площадь
+    FROM real_estate.flats  
+    JOIN real_estate.advertisement USING (id)
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits) 
+        AND rooms < (SELECT rooms_limit FROM limits) 
+        AND balcony < (SELECT balcony_limit FROM limits) 
+        AND ceiling_height < (SELECT ceiling_height_limit_h FROM limits) 
+        AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)
+    GROUP BY месяц_публикации
+    )  
+SELECT *
+FROM filtered_id;
+
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats
+    ),
+filtered_id AS(
+    SELECT
+    	ROW_NUMBER () OVER (ORDER BY COUNT(id) DESC) AS ранг,
+    	CASE 
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 1 THEN 'январь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 2 THEN 'февраль'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 3 THEN 'март'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 4 THEN 'апрель'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 5 THEN 'май'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 6 THEN 'июнь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 7 THEN 'июль'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 8 THEN 'август'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 9 THEN 'сентябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 10 THEN 'октябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 11 THEN 'ноябрь'
+    		WHEN EXTRACT ('month' FROM first_day_exposition + days_exposition * INTERVAL'1 day') = 12 THEN 'декабрь'
+    	END AS месяц_покупки,
+    	COUNT(id) AS количество_покупок,
+    	ROUND(AVG (last_price / total_area)) AS средняя_стоимость_кв_м,
+    	ROUND(AVG (total_area)) AS средняя_площадь
+    FROM real_estate.flats  
+    JOIN real_estate.advertisement USING (id)
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits) 
+        AND rooms < (SELECT rooms_limit FROM limits) 
+        AND balcony < (SELECT balcony_limit FROM limits) 
+        AND ceiling_height < (SELECT ceiling_height_limit_h FROM limits) 
+        AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)
+        AND days_exposition IS NOT NULL 
+    GROUP BY месяц_покупки
+    )  
+SELECT *
+FROM filtered_id;
+
+-- Задача 3: Анализ рынка недвижимости Ленобласти
+-- Результат запроса должен ответить на такие вопросы:
+-- 1. В каких населённые пунктах Ленинградской области наиболее активно публикуют объявления о продаже недвижимости?
+-- 2. В каких населённых пунктах Ленинградской области — самая высокая доля снятых с публикации объявлений? 
+--    Это может указывать на высокую долю продажи недвижимости.
+-- 3. Какова средняя стоимость одного квадратного метра и средняя площадь продаваемых квартир в различных населённых пунктах? 
+--    Есть ли вариация значений по этим метрикам?
+-- 4. Среди выделенных населённых пунктов какие пункты выделяются по продолжительности публикации объявлений? 
+--    То есть где недвижимость продаётся быстрее, а где — медленнее.
+
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+filtered_id AS(
+    SELECT 
+    	ROW_NUMBER () OVER (ORDER BY COUNT(id) DESC) AS ранг, 
+    	city AS город,
+    	COUNT(id) AS количество_объявлений,
+    	ROUND(100 * COUNT (id) FILTER (WHERE days_exposition IS NOT NULL)/ COUNT (id) :: NUMERIC) AS процент_снятых_публикаций,
+    	ROUND(AVG (last_price / total_area)) AS средняя_стоимость_кв_м,
+    	ROUND (AVG (total_area)) AS средняя_площадь_квартиры,
+    	ROUND(AVG(days_exposition)) AS продолжительность_продаж
+    FROM real_estate.flats  
+    JOIN real_estate.city USING (city_id)
+    JOIN real_estate.advertisement USING (id)
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits) 
+        AND rooms < (SELECT rooms_limit FROM limits) 
+        AND balcony < (SELECT balcony_limit FROM limits) 
+        AND ceiling_height < (SELECT ceiling_height_limit_h FROM limits) 
+        AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)
+        AND city NOT LIKE 'Санкт-Петербург'
+    GROUP BY city
+    )
+SELECT *
+FROM filtered_id
+WHERE ранг <= 15;
+
+
+
+
+
